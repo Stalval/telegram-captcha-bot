@@ -28,10 +28,11 @@ logger = logging.getLogger(__name__)
 
 
 async def welcome_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Отправляет капчу новым участникам группы."""
+    """Отправляет капчу и запоминает ID сообщения о входе."""
     if not update.message or not update.message.new_chat_members:
         return
         
+    join_message_id = update.message.message_id
     new_members = update.message.new_chat_members
     chat = update.effective_chat
     
@@ -50,9 +51,16 @@ async def welcome_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logger.error(f"Не удалось ограничить права {member.id}: {e}.")
             return
 
+        # Добавляем ID сообщения о входе в callback_data
         keyboard_buttons = [
-            InlineKeyboardButton(text=CORRECT_ANSWER_TEXT, callback_data=f"verify_correct_{member.id}"),
-            InlineKeyboardButton(text=WRONG_ANSWER_TEXT, callback_data=f"verify_wrong_{member.id}")
+            InlineKeyboardButton(
+                text=CORRECT_ANSWER_TEXT, 
+                callback_data=f"verify_correct_{member.id}_{join_message_id}"
+            ),
+            InlineKeyboardButton(
+                text=WRONG_ANSWER_TEXT, 
+                callback_data=f"verify_wrong_{member.id}_{join_message_id}"
+            )
         ]
         random.shuffle(keyboard_buttons)
         reply_markup = InlineKeyboardMarkup([keyboard_buttons])
@@ -73,8 +81,10 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
 
     try:
-        _, action, target_user_id_str = query.data.split("_")
+        # Теперь получаем 3 части: действие, ID юзера, ID сообщения о входе
+        _, action, target_user_id_str, join_message_id_str = query.data.split("_")
         target_user_id = int(target_user_id_str)
+        join_message_id = int(join_message_id_str)
     except (ValueError, IndexError):
         logger.warning(f"Некорректный формат callback_data: {query.data}")
         return
@@ -98,6 +108,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             logger.info(f"Пользователь {user.full_name} ({user.id}) прошел проверку.")
             
+            # Удаляем ТОЛЬКО сообщение с капчей. Сообщение о входе остается.
             await query.delete_message()
             
             welcome_text = f"""✅ Привет, {user.mention_html()}! Проверка пройдена.
@@ -108,14 +119,12 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 3. Запрещены дискриминация по любому признаку, сексизм, расизм, антисемитизм, ксенофобия.
 
 <b>Большая просьба:</b>
-Если есть желание начать спор с конкретным участником, переходите в личные сообщения. Остальным не интересно наблюдать за вашей перепалкой.
+Если есть желание начать спор с конкретным участником, переходите в личные сообщения.
 
 <b>Наказания за нарушения:</b>
 - 1-е нарушение: предупреждение.
 - 2-е нарушение: запрет писать на 24 часа.
 - 3-е нарушение: постоянный запрет писать в чате.
-
-<i>Возможность читать чат остаётся.</i>
 """
             msg = await context.bot.send_message(
                 chat_id=chat_id,
@@ -131,14 +140,23 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif action == "wrong":
         try:
-            # 1. Просто удаляем сообщение с капчей.
+            # Удаляем сообщение с капчей
             await query.delete_message()
-            
-            # 2. Вычисляем время окончания ограничения (текущее время + 5 секунд).
-            until_date = datetime.datetime.now() + datetime.timedelta(seconds=5)
+            # Удаляем системное сообщение "User joined the group"
+            await context.bot.delete_message(chat_id=chat_id, message_id=join_message_id)
 
-            # 3. Устанавливаем ограничение на 5 секунд. Пользователь ничего не узнает,
-            #    но и написать не сможет. Системное сообщение о кике не появится.
+            # Отправляем временное сообщение с инструкцией
+            error_text = (f"❌ {user.mention_html()}, вы не прошли проверку. \n"
+                          f"Попробуйте выйти и снова войти в группу, чтобы получить новую капчу.")
+            
+            error_msg = await context.bot.send_message(
+                chat_id=chat_id,
+                text=error_text,
+                parse_mode='HTML'
+            )
+            
+            # Ограничиваем пользователя на 10 секунд, чтобы он не мог ничего писать
+            until_date = datetime.datetime.now() + datetime.timedelta(seconds=10)
             await context.bot.restrict_chat_member(
                 chat_id=chat_id,
                 user_id=user.id,
@@ -146,7 +164,11 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 until_date=until_date
             )
             
-            logger.info(f"Пользователь {user.full_name} ({user.id}) не прошел проверку. Ограничен на 5 секунд без уведомления.")
+            logger.info(f"Пользователь {user.full_name} ({user.id}) не прошел проверку. Сообщения удалены, пользователь ограничен на 10 сек.")
+            
+            # Ставим сообщение об ошибке на удаление через 20 секунд
+            if context.job_queue:
+                context.job_queue.run_once(lambda ctx: ctx.bot.delete_message(chat_id, error_msg.message_id), 20)
 
         except Exception as e:
             logger.error(f"Не удалось обработать неверный ответ для {user.id}: {e}")
