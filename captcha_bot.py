@@ -6,6 +6,7 @@ import random
 import os
 import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ChatPermissions
+from telegram.error import Forbidden, BadRequest
 from telegram.ext import (
     Application,
     MessageHandler,
@@ -51,16 +52,9 @@ async def welcome_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logger.error(f"Не удалось ограничить права {member.id}: {e}.")
             return
 
-        # Добавляем ID сообщения о входе в callback_data
         keyboard_buttons = [
-            InlineKeyboardButton(
-                text=CORRECT_ANSWER_TEXT, 
-                callback_data=f"verify_correct_{member.id}_{join_message_id}"
-            ),
-            InlineKeyboardButton(
-                text=WRONG_ANSWER_TEXT, 
-                callback_data=f"verify_wrong_{member.id}_{join_message_id}"
-            )
+            InlineKeyboardButton(text=CORRECT_ANSWER_TEXT, callback_data=f"verify_correct_{member.id}_{join_message_id}"),
+            InlineKeyboardButton(text=WRONG_ANSWER_TEXT, callback_data=f"verify_wrong_{member.id}_{join_message_id}")
         ]
         random.shuffle(keyboard_buttons)
         reply_markup = InlineKeyboardMarkup([keyboard_buttons])
@@ -81,7 +75,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
 
     try:
-        # Теперь получаем 3 части: действие, ID юзера, ID сообщения о входе
         _, action, target_user_id_str, join_message_id_str = query.data.split("_")
         target_user_id = int(target_user_id_str)
         join_message_id = int(join_message_id_str)
@@ -95,6 +88,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     chat_id = query.message.chat.id
     user = query.from_user
+    chat = query.effective_chat 
 
     if action == "correct":
         try:
@@ -108,7 +102,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             logger.info(f"Пользователь {user.full_name} ({user.id}) прошел проверку.")
             
-            # Удаляем ТОЛЬКО сообщение с капчей. Сообщение о входе остается.
             await query.delete_message()
             
             welcome_text = f"""✅ Привет, {user.mention_html()}! Проверка пройдена.
@@ -119,12 +112,14 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 3. Запрещены дискриминация по любому признаку, сексизм, расизм, антисемитизм, ксенофобия.
 
 <b>Большая просьба:</b>
-Если есть желание начать спор с конкретным участником, переходите в личные сообщения.
+Если есть желание начать спор с конкретным участником, переходите в личные сообщения. Участникам чата не интересно наблюдать за перепалкой двух человек.
 
 <b>Наказания за нарушения:</b>
 - 1-е нарушение: предупреждение.
 - 2-е нарушение: запрет писать на 24 часа.
 - 3-е нарушение: постоянный запрет писать в чате.
+
+<i>Возможность читать чат остаётся.</i>
 """
             msg = await context.bot.send_message(
                 chat_id=chat_id,
@@ -140,22 +135,20 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif action == "wrong":
         try:
-            # Удаляем сообщение с капчей
             await query.delete_message()
-            # Удаляем системное сообщение "User joined the group"
             await context.bot.delete_message(chat_id=chat_id, message_id=join_message_id)
 
-            # Отправляем временное сообщение с инструкцией
-            error_text = (f"❌ {user.mention_html()}, вы не прошли проверку. \n"
-                          f"Попробуйте выйти и снова войти в группу, чтобы получить новую капчу.")
+            try:
+                error_text = (f"❌ Вы не прошли проверку для входа в группу «{chat.title}».\n\n"
+                              f"Попробуйте выйти и снова войти в группу, чтобы получить новую капчу.")
+                await context.bot.send_message(
+                    chat_id=user.id,
+                    text=error_text
+                )
+                logger.info(f"Отправлено личное уведомление об ошибке пользователю {user.id}")
+            except (Forbidden, BadRequest) as e:
+                logger.warning(f"Не удалось отправить личное сообщение пользователю {user.id}: {e}")
             
-            error_msg = await context.bot.send_message(
-                chat_id=chat_id,
-                text=error_text,
-                parse_mode='HTML'
-            )
-            
-            # Ограничиваем пользователя на 10 секунд, чтобы он не мог ничего писать
             until_date = datetime.datetime.now() + datetime.timedelta(seconds=10)
             await context.bot.restrict_chat_member(
                 chat_id=chat_id,
@@ -164,12 +157,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 until_date=until_date
             )
             
-            logger.info(f"Пользователь {user.full_name} ({user.id}) не прошел проверку. Сообщения удалены, пользователь ограничен на 10 сек.")
+            logger.info(f"Пользователь {user.full_name} ({user.id}) не прошел проверку. Сообщения в группе удалены.")
             
-            # Ставим сообщение об ошибке на удаление через 20 секунд
-            if context.job_queue:
-                context.job_queue.run_once(lambda ctx: ctx.bot.delete_message(chat_id, error_msg.message_id), 20)
-
         except Exception as e:
             logger.error(f"Не удалось обработать неверный ответ для {user.id}: {e}")
 
