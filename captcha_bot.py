@@ -98,10 +98,10 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             await query.delete_message()
             
-            msg = await context.bot.send_message(chat_id, f"✅ Отлично, {user.mention_html()}! Проверка пройдена.", parse_mode='HTML')
+            msg = await context.bot.send_message(chat_id, f"✅ Привет, {user.mention_html()}! Проверка пройдена.Правила чата: 1. Запрещены мат и оскорбления участников. 2 . Проявляйте уважение друг к другу, исключение вата (которая удаляется из чата по умолчанию) 3. Запрещены дискриминация по любому признаку, сексизм, расизм, антисемитизм, ксенофобия. И не правило, но большая просьба, если есть желание начать спор с конкретным участником чата, переходите в личку, участникам чата совершенно не интересно наблюдать за перепалкой двух человек на протяжении сотен сообщений. За нарушение в первый раз - предупреждение, второй раз отключение возможности писать в чат на 24 часа, за третье нарушение - запрет писать в чат перманентно. Возможность читать чат остаётся ", parse_mode='HTML')
             
             if context.job_queue:
-                context.job_queue.run_once(lambda ctx: ctx.bot.delete_message(chat_id, msg.message_id), 10) # Примерно 10 секунд
+                context.job_queue.run_once(lambda ctx: ctx.bot.delete_message(chat_id, msg.message_id), 30) # Примерно 10 секунд
         except Exception as e:
             logger.error(f"Не удалось снять ограничения с {user.id}: {e}")
 
