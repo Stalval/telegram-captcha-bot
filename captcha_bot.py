@@ -1,6 +1,9 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 import logging
 import random
-import os  # Добавлен импорт для работы с переменными окружения
+import os
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ChatPermissions
 from telegram.ext import (
     Application,
@@ -11,8 +14,7 @@ from telegram.ext import (
 )
 
 # --- НАСТРОЙКИ ---
-# 1. Токен теперь будет загружаться из переменных окружения сервера.
-#    Это безопасно и является стандартом для развертывания.
+# 1. Токен загружается из переменных окружения сервера.
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
 
 # 2. Укажите прямую ссылку на картинку для проверки.
@@ -45,6 +47,7 @@ async def welcome_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
         logger.info(f"Новый пользователь {member.full_name} ({member.id}) в чате {chat.title}.")
         try:
+            # Ограничиваем права пользователя сразу при входе
             await context.bot.restrict_chat_member(
                 chat_id=chat.id,
                 user_id=member.id,
@@ -61,9 +64,12 @@ async def welcome_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
         random.shuffle(keyboard_buttons)
         reply_markup = InlineKeyboardMarkup([keyboard_buttons])
 
+        # Приветственное сообщение для капчи
+        captcha_caption = f"Добро пожаловать, {member.mention_html()}! Чтобы писать в чат, подтвердите, что вы не робот. Нажмите на правильный ответ."
+
         await update.message.reply_photo(
             photo=IMAGE_URL,
-            caption=f"Добро пожаловать, {member.mention_html()}! Чтобы писать в чат, подтвердите, что вы не робот. Нажмите на правильный ответ.",
+            caption=captcha_caption,
             reply_markup=reply_markup,
             parse_mode='HTML'
         )
@@ -74,9 +80,15 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
-    action, target_user_id_str = query.data.split("_")[1:]
-    target_user_id = int(target_user_id_str)
+    # Извлекаем действие и ID пользователя, для которого предназначена кнопка
+    try:
+        _, action, target_user_id_str = query.data.split("_")
+        target_user_id = int(target_user_id_str)
+    except (ValueError, IndexError):
+        logger.warning(f"Некорректный формат callback_data: {query.data}")
+        return
 
+    # Проверяем, что на кнопку нажал именно тот пользователь, которому она адресована
     if query.from_user.id != target_user_id:
         await query.answer("Это проверка для другого пользователя.", show_alert=True)
         return
@@ -86,6 +98,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if action == "correct":
         try:
+            # Снимаем ограничения
             full_permissions = ChatPermissions(
                 can_send_messages=True, can_send_audios=True, can_send_documents=True,
                 can_send_photos=True, can_send_videos=True, can_send_video_notes=True,
@@ -96,17 +109,46 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             logger.info(f"Пользователь {user.full_name} ({user.id}) прошел проверку.")
             
+            # Удаляем сообщение с капчей
             await query.delete_message()
             
-            msg = await context.bot.send_message(chat_id, f"✅ Привет, {user.mention_html()}! Проверка пройдена.Правила чата: 1. Запрещены мат и оскорбления участников. 2 . Проявляйте уважение друг к другу, исключение вата (которая удаляется из чата по умолчанию) 3. Запрещены дискриминация по любому признаку, сексизм, расизм, антисемитизм, ксенофобия. И не правило, но большая просьба, если есть желание начать спор с конкретным участником чата, переходите в личку, участникам чата совершенно не интересно наблюдать за перепалкой двух человек на протяжении сотен сообщений. За нарушение в первый раз - предупреждение, второй раз отключение возможности писать в чат на 24 часа, за третье нарушение - запрет писать в чат перманентно. Возможность читать чат остаётся ", parse_mode='HTML')
+            # --- ОСНОВНОЕ ИЗМЕНЕНИЕ ЗДЕСЬ ---
+            # Создаем красивый, многострочный текст с правилами
+            welcome_text = f"""✅ Привет, {user.mention_html()}! Проверка пройдена.
+
+<b>Правила чата:</b>
+1. Запрещены мат и оскорбления участников.
+2. Проявляйте уважение друг к другу (исключение — вата, которая удаляется по умолчанию).
+3. Запрещены дискриминация по любому признаку, сексизм, расизм, антисемитизм, ксенофобия.
+
+<b>Большая просьба:</b>
+Если есть желание начать спор с конкретным участником, переходите в личные сообщения. Остальным не интересно наблюдать за вашей перепалкой.
+
+<b>Наказания за нарушения:</b>
+- 1-е нарушение: предупреждение.
+- 2-е нарушение: запрет писать на 24 часа.
+- 3-е нарушение: постоянный запрет писать в чате.
+
+<i>Возможность читать чат остаётся.</i>
+"""
+            # Отправляем отформатированное сообщение
+            msg = await context.bot.send_message(
+                chat_id=chat_id,
+                text=welcome_text,
+                parse_mode='HTML'
+            )
+            # --- КОНЕЦ ИЗМЕНЕНИЙ ---
             
+            # Ставим сообщение с правилами на удаление через 60 секунд, чтобы не засорять чат
             if context.job_queue:
-                context.job_queue.run_once(lambda ctx: ctx.bot.delete_message(chat_id, msg.message_id), 30) # Примерно 10 секунд
+                context.job_queue.run_once(lambda ctx: ctx.bot.delete_message(chat_id, msg.message_id), 60)
+
         except Exception as e:
             logger.error(f"Не удалось снять ограничения с {user.id}: {e}")
 
     elif action == "wrong":
         try:
+            # Кикаем пользователя (бан + моментальный разбан)
             await context.bot.ban_chat_member(chat_id=chat_id, user_id=user.id)
             await context.bot.unban_chat_member(chat_id=chat_id, user_id=user.id)
             logger.info(f"Пользователь {user.full_name} ({user.id}) кикнут за неверный ответ.")
@@ -123,12 +165,15 @@ def main():
 
     application = Application.builder().token(TOKEN).build()
     
+    # Обработчик для новых участников чата
     application.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, welcome_member))
+    # Обработчик для нажатий на inline-кнопки с префиксом "verify_"
     application.add_handler(CallbackQueryHandler(button_callback, pattern=r"^verify_"))
     
     print("Бот запущен...")
     application.run_polling()
     print("Бот остановлен.")
+
 
 if __name__ == "__main__":
     main()
