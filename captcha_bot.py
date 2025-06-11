@@ -4,6 +4,7 @@
 import logging
 import random
 import os
+import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ChatPermissions
 from telegram.ext import (
     Application,
@@ -14,19 +15,12 @@ from telegram.ext import (
 )
 
 # --- НАСТРОЙКИ ---
-# 1. Токен загружается из переменных окружения сервера.
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
-
-# 2. Укажите прямую ссылку на картинку для проверки.
 IMAGE_URL = "https://drive.google.com/uc?export=view&id=1uwlyma2UL6Fmk3b_lUu5iZ8qry6IIyME"
-
-# 3. Напишите тексты для кнопок.
 CORRECT_ANSWER_TEXT = "Героям слава!"
 WRONG_ANSWER_TEXT = "Не все так однозначно"
 # ------------------
 
-
-# Инициализация логирования
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
 )
@@ -47,7 +41,6 @@ async def welcome_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
         logger.info(f"Новый пользователь {member.full_name} ({member.id}) в чате {chat.title}.")
         try:
-            # Ограничиваем права пользователя сразу при входе
             await context.bot.restrict_chat_member(
                 chat_id=chat.id,
                 user_id=member.id,
@@ -64,7 +57,6 @@ async def welcome_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
         random.shuffle(keyboard_buttons)
         reply_markup = InlineKeyboardMarkup([keyboard_buttons])
 
-        # Приветственное сообщение для капчи
         captcha_caption = f"Добро пожаловать, {member.mention_html()}! Чтобы писать в чат, подтвердите, что вы не робот. Нажмите на правильный ответ."
 
         await update.message.reply_photo(
@@ -80,7 +72,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
-    # Извлекаем действие и ID пользователя, для которого предназначена кнопка
     try:
         _, action, target_user_id_str = query.data.split("_")
         target_user_id = int(target_user_id_str)
@@ -88,7 +79,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.warning(f"Некорректный формат callback_data: {query.data}")
         return
 
-    # Проверяем, что на кнопку нажал именно тот пользователь, которому она адресована
     if query.from_user.id != target_user_id:
         await query.answer("Это проверка для другого пользователя.", show_alert=True)
         return
@@ -98,7 +88,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if action == "correct":
         try:
-            # Снимаем ограничения
             full_permissions = ChatPermissions(
                 can_send_messages=True, can_send_audios=True, can_send_documents=True,
                 can_send_photos=True, can_send_videos=True, can_send_video_notes=True,
@@ -109,11 +98,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             logger.info(f"Пользователь {user.full_name} ({user.id}) прошел проверку.")
             
-            # Удаляем сообщение с капчей
             await query.delete_message()
             
-            # --- ОСНОВНОЕ ИЗМЕНЕНИЕ ЗДЕСЬ ---
-            # Создаем красивый, многострочный текст с правилами
             welcome_text = f"""✅ Привет, {user.mention_html()}! Проверка пройдена.
 
 <b>Правила чата:</b>
@@ -131,15 +117,12 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 <i>Возможность читать чат остаётся.</i>
 """
-            # Отправляем отформатированное сообщение
             msg = await context.bot.send_message(
                 chat_id=chat_id,
                 text=welcome_text,
                 parse_mode='HTML'
             )
-            # --- КОНЕЦ ИЗМЕНЕНИЙ ---
             
-            # Ставим сообщение с правилами на удаление через 60 секунд, чтобы не засорять чат
             if context.job_queue:
                 context.job_queue.run_once(lambda ctx: ctx.bot.delete_message(chat_id, msg.message_id), 60)
 
@@ -148,13 +131,25 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif action == "wrong":
         try:
-            # Кикаем пользователя (бан + моментальный разбан)
-            await context.bot.ban_chat_member(chat_id=chat_id, user_id=user.id)
-            await context.bot.unban_chat_member(chat_id=chat_id, user_id=user.id)
-            logger.info(f"Пользователь {user.full_name} ({user.id}) кикнут за неверный ответ.")
+            # 1. Просто удаляем сообщение с капчей.
             await query.delete_message()
+            
+            # 2. Вычисляем время окончания ограничения (текущее время + 5 секунд).
+            until_date = datetime.datetime.now() + datetime.timedelta(seconds=5)
+
+            # 3. Устанавливаем ограничение на 5 секунд. Пользователь ничего не узнает,
+            #    но и написать не сможет. Системное сообщение о кике не появится.
+            await context.bot.restrict_chat_member(
+                chat_id=chat_id,
+                user_id=user.id,
+                permissions=ChatPermissions(can_send_messages=False),
+                until_date=until_date
+            )
+            
+            logger.info(f"Пользователь {user.full_name} ({user.id}) не прошел проверку. Ограничен на 5 секунд без уведомления.")
+
         except Exception as e:
-            logger.error(f"Не удалось кикнуть {user.id}: {e}")
+            logger.error(f"Не удалось обработать неверный ответ для {user.id}: {e}")
 
 
 def main():
@@ -165,9 +160,7 @@ def main():
 
     application = Application.builder().token(TOKEN).build()
     
-    # Обработчик для новых участников чата
     application.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, welcome_member))
-    # Обработчик для нажатий на inline-кнопки с префиксом "verify_"
     application.add_handler(CallbackQueryHandler(button_callback, pattern=r"^verify_"))
     
     print("Бот запущен...")
