@@ -88,7 +88,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     chat_id = query.message.chat.id
     user = query.from_user
-    chat = query.effective_chat 
+    # --- ИСПРАВЛЕНИЕ ЗДЕСЬ ---
+    chat = query.message.chat 
 
     if action == "correct":
         try:
