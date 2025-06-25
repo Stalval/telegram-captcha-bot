@@ -5,6 +5,7 @@ import logging
 import random
 import os
 import datetime
+import asyncio
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ChatPermissions
 from telegram.error import Forbidden, BadRequest
 from telegram.ext import (
@@ -32,20 +33,27 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-async def delete_service_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Удаляет системные сообщения о входе и выходе участников."""
+async def delete_left_member_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Удаляет только сообщения о выходе/кике участников."""
     if update.message:
         try:
             await update.message.delete()
-            logger.info("Удалено системное сообщение.")
+            logger.info("Удалено системное сообщение о выходе/кике участника.")
         except BadRequest:
-            logger.warning("Не удалось удалить системное сообщение (возможно, уже удалено).")
+            pass
 
 
 async def welcome_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Отправляет капчу и ставит таймер на удаление."""
+    """СНАЧАЛА удаляет сообщение о входе, ПОТОМ отправляет капчу и ставит таймер."""
     if not update.message or not update.message.new_chat_members:
         return
+
+    try:
+        await asyncio.sleep(0.5) # Небольшая задержка для надежности
+        await update.message.delete()
+        logger.info(f"Успешно удалено системное сообщение о входе.")
+    except (BadRequest, Forbidden) as e:
+        logger.warning(f"Не удалось удалить сообщение о входе: {e}. Проверьте права бота!")
 
     join_message_id = update.message.message_id
     new_members = update.message.new_chat_members
@@ -55,7 +63,7 @@ async def welcome_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if member.is_bot:
             continue
 
-        logger.info(f"Новый пользователь {member.full_name} ({member.id}) в чате {chat.title}.")
+        logger.info(f"Начинаю обработку нового пользователя {member.full_name} ({member.id}).")
         try:
             await context.bot.restrict_chat_member(
                 chat_id=chat.id, user_id=member.id, permissions=ChatPermissions(can_send_messages=False)
@@ -71,9 +79,9 @@ async def welcome_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
         random.shuffle(keyboard_buttons)
         reply_markup = InlineKeyboardMarkup([keyboard_buttons])
         captcha_caption = f"Добро пожаловать, {member.mention_html()}! У вас есть {CAPTCHA_TIMEOUT_SECONDS} секунд, чтобы подтвердить, что вы не робот. Нажмите на правильный ответ."
-
-        captcha_message = await update.message.reply_photo(
-            photo=IMAGE_URL, caption=captcha_caption, reply_markup=reply_markup, parse_mode='HTML'
+        
+        captcha_message = await context.bot.send_photo(
+            chat_id=chat.id, photo=IMAGE_URL, caption=captcha_caption, reply_markup=reply_markup, parse_mode='HTML'
         )
 
         job_name = f"captcha_timeout_{chat.id}_{member.id}"
@@ -88,15 +96,11 @@ async def welcome_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def delete_captcha_timeout(context: ContextTypes.DEFAULT_TYPE):
     """Удаляет капчу и пользователя, если он не ответил вовремя."""
     job_data = context.job.data
-    chat_id = job_data['chat_id']
-    captcha_message_id = job_data['captcha_message_id']
-    user_id = job_data['user_id']
+    chat_id, captcha_message_id, user_id = job_data['chat_id'], job_data['captcha_message_id'], job_data['user_id']
     logger.info(f"Сработал таймаут капчи для {user_id}. Удаление.")
-
     try:
         await context.bot.delete_message(chat_id=chat_id, message_id=captcha_message_id)
-    except BadRequest:
-        logger.warning(f"Не удалось удалить капчу (возможно, уже удалена).")
+    except BadRequest: pass
     try:
         await context.bot.ban_chat_member(chat_id=chat_id, user_id=user_id, until_date=datetime.datetime.now() + datetime.timedelta(seconds=40))
         await context.bot.unban_chat_member(chat_id=chat_id, user_id=user_id, only_if_banned=True)
@@ -112,7 +116,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         _, action, target_user_id_str, join_message_id_str = query.data.split("_")
         target_user_id = int(target_user_id_str)
     except (ValueError, IndexError):
-        logger.warning(f"Некорректный формат callback_data: {query.data}")
         await query.answer()
         return
 
@@ -129,13 +132,11 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer("Срок действия этой проверки истек.", show_alert=True)
         try:
             await query.delete_message()
-        except BadRequest:
-            pass
+        except BadRequest: pass
         return
 
     for job in current_jobs:
         job.schedule_removal()
-    logger.info(f"Удален таймаут '{job_name}' для пользователя {user.id}.")
     await query.answer()
 
     if action == "correct":
@@ -147,10 +148,9 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 can_add_web_page_previews=True
             )
             await context.bot.restrict_chat_member(chat_id=chat_id, user_id=user.id, permissions=full_permissions)
-            logger.info(f"Пользователь {user.full_name} ({user.id}) прошел проверку.")
             await query.delete_message()
-
-            # ИСПРАВЛЕНО: Возвращен полный текст правил
+            
+            # <<< --- ПОЛНЫЙ ТЕКСТ ПРАВИЛ ВОССТАНОВЛЕН --- >>>
             welcome_text = f"""✅ Привет, {user.mention_html()}! Проверка пройдена.
 
 <b>Правила чата:</b>
@@ -170,30 +170,23 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 """
             msg = await context.bot.send_message(chat_id=chat_id, text=welcome_text, parse_mode='HTML')
             context.job_queue.run_once(lambda ctx: ctx.bot.delete_message(chat_id, msg.message_id), 60)
-
         except Exception as e:
             logger.error(f"Не удалось снять ограничения с {user.id}: {e}")
 
     elif action == "wrong":
         try:
-            chat_title = query.message.chat.title
             await query.delete_message()
-            
+            chat_title = query.message.chat.title
+            error_text = (f"❌ Вы не прошли проверку для входа в группу «{chat_title}».\n\n"
+                           f"Вы были удалены из группы, но можете сразу же войти снова и попробовать еще раз.")
             try:
-                error_text = (f"❌ Вы не прошли проверку для входа в группу «{chat_title}».\n\n"
-                              f"Вы были удалены из группы, но можете сразу же войти снова и попробовать еще раз.")
                 await context.bot.send_message(chat_id=user.id, text=error_text)
-                logger.info(f"Отправлено ЛС об ошибке пользователю {user.id}")
-            except (Forbidden, BadRequest) as e:
-                logger.warning(f"Не удалось отправить ЛС пользователю {user.id}: {e}")
-            
+            except (Forbidden, BadRequest): pass
             await context.bot.ban_chat_member(chat_id=chat_id, user_id=user.id, until_date=datetime.datetime.now() + datetime.timedelta(seconds=40))
             await context.bot.unban_chat_member(chat_id=chat_id, user_id=user.id, only_if_banned=True)
             logger.info(f"Пользователь {user.full_name} ({user.id}) не прошел проверку и был удален.")
-            
         except Exception as e:
             logger.error(f"Не удалось обработать неверный ответ для {user.id}: {e}")
-
 
 def main():
     """Основная функция для запуска бота."""
@@ -201,16 +194,11 @@ def main():
     
     application.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, welcome_member))
     application.add_handler(CallbackQueryHandler(button_callback, pattern=r"^verify_"))
+    application.add_handler(MessageHandler(filters.StatusUpdate.LEFT_CHAT_MEMBER, delete_left_member_message))
     
-    application.add_handler(MessageHandler(
-        filters.StatusUpdate.NEW_CHAT_MEMBERS | filters.StatusUpdate.LEFT_CHAT_MEMBER,
-        delete_service_messages
-    ))
-    
-    print("Бот запущен - ВЕРСИЯ 2 - удаление работает")
+    print("Бот запущен - финальная версия с правилами")
     application.run_polling()
     print("Бот остановлен.")
-
 
 if __name__ == "__main__":
     main()
