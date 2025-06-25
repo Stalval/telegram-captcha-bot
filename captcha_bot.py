@@ -207,7 +207,7 @@ def main():
         delete_service_messages
     ))
     
-    print("Бот запущен...")
+    print("Бот запущен - ВЕРСИЯ 2 - удаление работает")
     application.run_polling()
     print("Бот остановлен.")
 
